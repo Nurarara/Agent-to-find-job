@@ -8,20 +8,15 @@ Run with:
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta
 
 import pandas as pd
 import streamlit as st
 
-from src.discovery import run_discovery
-from src.enrichment import build_outreach_message, find_linkedin_contacts, is_recent_job, persist_enrichment
-from src.filter import run_filter
-from src.profiles import PROFILES, get_profile
-from src.tracker import get_conn, get_stats, init_db, mark_applied, update_job
-
-
 TARGET_JOB_COUNT = 50
 AUTO_REFRESH_HOURS = 6
+REQUIRED_DISCOVERY_KEYS = ("ADZUNA_APP_ID", "ADZUNA_API_KEY", "REED_API_KEY", "SERPAPI_KEY")
 
 st.set_page_config(
     page_title="Job Hunt Command Center",
@@ -29,6 +24,25 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+def load_streamlit_secrets() -> None:
+    """Expose Streamlit Cloud secrets as env vars for the existing modules."""
+    try:
+        for key, value in st.secrets.items():
+            if isinstance(value, str):
+                os.environ.setdefault(key, value)
+    except Exception:
+        pass
+
+
+load_streamlit_secrets()
+
+from src.discovery import run_discovery
+from src.enrichment import build_outreach_message, find_linkedin_contacts, is_recent_job, persist_enrichment
+from src.filter import run_filter
+from src.profiles import get_profile
+from src.tracker import get_conn, get_stats, init_db, mark_applied, update_job
 
 init_db()
 
@@ -131,12 +145,21 @@ def last_refresh_at(profile_key: str = "ron") -> datetime | None:
 
 
 def refresh_jobs(prompt: str, profile_key: str) -> int:
+    missing = missing_discovery_keys()
+    if missing:
+        raise RuntimeError(f"Missing Streamlit secrets: {', '.join(missing)}")
     new_count = run_discovery(prompt=prompt, profile_key=profile_key)
     run_filter(profile_key=profile_key)
     return new_count
 
 
+def missing_discovery_keys() -> list[str]:
+    return [key for key in REQUIRED_DISCOVERY_KEYS if not os.getenv(key)]
+
+
 def maybe_auto_refresh(prompt: str, profile_key: str) -> None:
+    if missing_discovery_keys():
+        return
     last = last_refresh_at(profile_key)
     stale = not last or last < datetime.utcnow() - timedelta(hours=AUTO_REFRESH_HOURS)
     refresh_key = f"auto_refreshed_{profile_key}"
@@ -179,6 +202,19 @@ def mark_job_applied(job_id: int) -> None:
     mark_applied(job_id, resume_path="", cover_letter="")
 
 
+def render_empty_state() -> None:
+    missing = missing_discovery_keys()
+    if missing:
+        st.warning("No jobs are loaded because the deployed app is missing job-board API secrets.")
+        st.markdown(
+            "Add these in **Streamlit Cloud -> App -> Settings -> Secrets**, then reboot or click refresh:"
+        )
+        st.code("\n".join(f'{key} = "..."' for key in missing), language="toml")
+        st.caption("The local SQLite database is private and is not committed to GitHub, so production must fetch jobs live.")
+    else:
+        st.info("No fresh matches yet. Click Refresh jobs now. If it still stays empty, the APIs returned no jobs under 5 days old for this profile.")
+
+
 st.sidebar.title("Job Hunt")
 st.sidebar.caption(datetime.utcnow().strftime("%a %d %b %Y"))
 
@@ -189,9 +225,12 @@ profile = get_profile(profile_key)
 search_prompt = st.sidebar.text_area("Search prompt", profile.search_prompt, height=190, key=f"prompt_{profile_key}")
 
 if st.sidebar.button("Refresh jobs now", type="primary"):
-    with st.spinner("Finding fresh roles and scoring matches..."):
-        added = refresh_jobs(search_prompt, profile.key)
-    st.sidebar.success(f"Refresh complete. {added} new jobs added.")
+    try:
+        with st.spinner("Finding fresh roles and scoring matches..."):
+            added = refresh_jobs(search_prompt, profile.key)
+        st.sidebar.success(f"Refresh complete. {added} new jobs added.")
+    except RuntimeError as exc:
+        st.sidebar.error(str(exc))
 
 if st.sidebar.button("Find contacts for top matches"):
     df_contacts = load_recent_matches(TARGET_JOB_COUNT, profile.key)
@@ -232,7 +271,7 @@ if page == "Job Matches":
 
     df = load_recent_matches(TARGET_JOB_COUNT, profile.key)
     if df.empty:
-        st.info("No fresh matches yet. Use Refresh jobs now.")
+        render_empty_state()
         st.stop()
 
     col_a, col_b, col_c = st.columns([1.2, 1, 1])
