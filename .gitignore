@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+jobs.db
+output/
+assets/*.docx
+assets/resumes/
+assets/voice_profile.txt
+CLAUDE.md
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.DS_Store
+.streamlit/secrets.toml
